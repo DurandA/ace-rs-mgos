@@ -2,6 +2,9 @@
 #define RS_HTTP_COSE_H
 
 #include "types.h"
+#include <wolfssl/options.h>
+#include <wolfssl/wolfcrypt/settings.h>
+#include <wolfssl/wolfcrypt/ecc.h>
 
 typedef struct cose_sign1 {
     bytes payload;
@@ -16,7 +19,7 @@ typedef struct cose_encrypt0 {
 } cose_encrypt0;
 
 void cose_encode_signed(cose_sign1* sign1,
-                        uint16_t key_id,
+                        ecc_key key,
                         uint8_t* out,
                         size_t out_size,
                         size_t* out_len);
@@ -39,7 +42,7 @@ void derive_key(bytes *input_key, bytes *info, uint8_t* out, size_t out_size);
 
 void cose_decrypt_enc0(bytes* enc0, uint8_t *key, uint8_t *iv, bytes* external_aad,
                        uint8_t* out, size_t out_size, size_t *out_len);
-int cose_verify_sign1(bytes* sign1, uint8_t *pub_key, bytes* external_aad);
+int cose_verify_sign1(bytes* sign1, ecc_key *peer_key, bytes* external_aad);
 
 
 #endif //RS_HTTP_COSE_H

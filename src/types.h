@@ -3,6 +3,9 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <wolfssl/options.h>
+#include <wolfssl/wolfcrypt/settings.h>
+#include <wolfssl/wolfcrypt/ecc.h>
 
 typedef struct bytes {
     uint8_t * buf;
@@ -10,8 +13,10 @@ typedef struct bytes {
 } bytes;
 
 struct edhoc_session_state {
+    ecc_key key;
+    ecc_key peer_key;
+    ecc_key eph_key;
     bytes session_id;
-    uint8_t pub_key[64];
     bytes shared_secret;
     bytes message1;
     bytes message2;

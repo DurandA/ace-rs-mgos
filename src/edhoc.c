@@ -3,7 +3,6 @@
 #include "edhoc.h"
 #include "cose.h"
 #include "tinycbor/cbor.h"
-#include "cryptoauthlib.h"
 #include "utils.h"
 
 #define DIGEST_SIZE 32
@@ -141,7 +140,7 @@ size_t edhoc_serialize_msg_1(edhoc_msg_1 *msg1, unsigned char* buffer, size_t bu
     return cbor_encoder_get_buffer_size(&enc, buffer);
 }
 
-size_t edhoc_serialize_msg_2(edhoc_msg_2 *msg2, msg_2_context* context, uint16_t sigkey_id, unsigned char* buffer, size_t buf_size) {
+size_t edhoc_serialize_msg_2(edhoc_msg_2 *msg2, msg_2_context* context, ecc_key sigkey, unsigned char* buffer, size_t buf_size) {
     // Compute AAD
     uint8_t aad2[DIGEST_SIZE];
     edhoc_aad2(msg2, context->message1, aad2);
@@ -149,7 +148,7 @@ size_t edhoc_serialize_msg_2(edhoc_msg_2 *msg2, msg_2_context* context, uint16_t
     // Compute Signature
     uint8_t sig_v[256];
     size_t sig_v_len = sizeof(sig_v);
-    edhoc_msg_sig(aad2, sigkey_id, sig_v, sizeof(sig_v), &sig_v_len);
+    edhoc_msg_sig(aad2, sigkey, sig_v, sizeof(sig_v), &sig_v_len);
 
     bytes b_sig_v = {sig_v, sig_v_len};
     //printf("sig_v: ");
@@ -208,7 +207,7 @@ size_t edhoc_serialize_msg_2(edhoc_msg_2 *msg2, msg_2_context* context, uint16_t
     return cbor_encoder_get_buffer_size(&enc, buffer);
 }
 
-size_t edhoc_serialize_msg_3(edhoc_msg_3 *msg3, msg_3_context* context, uint16_t sigkey_id, unsigned char* buffer, size_t buf_size) {
+size_t edhoc_serialize_msg_3(edhoc_msg_3 *msg3, msg_3_context* context, ecc_key key, unsigned char* buffer, size_t buf_size) {
     // Compute AAD
     uint8_t aad3[DIGEST_SIZE];
     edhoc_aad3(msg3, context->message1, context->message2, aad3);
@@ -216,7 +215,7 @@ size_t edhoc_serialize_msg_3(edhoc_msg_3 *msg3, msg_3_context* context, uint16_t
     // Compute Signature
     uint8_t sig_u[256];
     size_t sig_u_len = sizeof(sig_u);
-    edhoc_msg_sig(aad3, sigkey_id, sig_u, sizeof(sig_u), &sig_u_len);
+    edhoc_msg_sig(aad3, key, sig_u, sizeof(sig_u), &sig_u_len);
 
     bytes b_sig_u = {sig_u, sig_u_len};
     //printf("sig_v: ");
@@ -302,11 +301,15 @@ void edhoc_aad2(edhoc_msg_2 *msg2, bytes message1, uint8_t *out_hash) {
 
     memcpy(aad2, message1.buf, message1.len);
     memcpy((aad2+message1.len), data2, data2_len);
-    
-    atcab_sha((uint16_t) sizeof(aad2), (const uint8_t*) aad2, out_hash);
+
+    Sha256 sha;
+    wc_InitSha256(&sha);
+    wc_Sha256Update(&sha, aad2, sizeof(aad2));
+    wc_Sha256Final(&sha, out_hash);
+    //atcab_sha((uint16_t) sizeof(aad2), (const uint8_t*) aad2, out_hash);
 }
 
-void edhoc_msg_sig(uint8_t* aad, uint16_t sigkey_id,
+void edhoc_msg_sig(uint8_t* aad, ecc_key key,
                       uint8_t* out, size_t out_size, size_t* out_len) {
 
     uint8_t *prot_header, *unprot_header;
@@ -319,7 +322,7 @@ void edhoc_msg_sig(uint8_t* aad, uint16_t sigkey_id,
     signature.unprotected_header = (bytes) {unprot_header, unprot_len};
     signature.external_aad = (bytes) {(uint8_t *) aad, DIGEST_SIZE};
 
-    cose_encode_signed(&signature, sigkey_id, out, out_size, out_len);
+    cose_encode_signed(&signature, key, out, out_size, out_len);
 
     free(prot_header);
     free(unprot_header);
@@ -345,7 +348,11 @@ void edhoc_aad3(edhoc_msg_3* msg3, bytes message1, bytes message2,
     memcpy(combined+message1.len, message2.buf, message2.len);
 
     uint8_t digest[DIGEST_SIZE];
-    atcab_sha((uint16_t) sizeof(combined), (const uint8_t*) combined, digest);
+    //atcab_sha((uint16_t) sizeof(combined), (const uint8_t*) combined, digest);
+    Sha256 sha;
+    wc_InitSha256(&sha);
+    wc_Sha256Update(&sha, combined, sizeof(combined));
+    wc_Sha256Final(&sha, digest);
 
     // Compute data3
     uint8_t data3[64];
@@ -367,7 +374,11 @@ void edhoc_aad3(edhoc_msg_3* msg3, bytes message1, bytes message2,
     memcpy(final, digest, DIGEST_SIZE);
     memcpy(final+DIGEST_SIZE, data3, data3_len);
     
-    atcab_sha((uint16_t) sizeof(final), (const uint8_t*) final, out_hash);
+    //atcab_sha((uint16_t) sizeof(final), (const uint8_t*) final, out_hash);
+    Sha256 sha2;
+    wc_InitSha256(&sha2);
+    wc_Sha256Update(&sha2, final, sizeof(final));
+    wc_Sha256Final(&sha2, out_hash);
 }
 
 void oscore_exchange_hash(bytes *msg1, bytes *msg2, bytes *msg3, uint8_t *out_hash) {
@@ -377,13 +388,22 @@ void oscore_exchange_hash(bytes *msg1, bytes *msg2, bytes *msg3, uint8_t *out_ha
     memcpy(combined+msg1->len, msg2->buf, msg2->len);
     
     uint8_t digest[DIGEST_SIZE];
-    atcab_sha((uint16_t) sizeof(combined), (const uint8_t*) combined, digest);
+    
+    //atcab_sha((uint16_t) sizeof(combined), (const uint8_t*) combined, digest);
+    Sha256 sha;
+    wc_InitSha256(&sha);
+    wc_Sha256Update(&sha, combined, sizeof(combined));
+    wc_Sha256Final(&sha, digest);
 
     // Comine with msg3
     uint8_t final[DIGEST_SIZE + msg3->len];
     memcpy(final, digest, DIGEST_SIZE);
     memcpy(final+DIGEST_SIZE, msg3->buf, msg3->len);
     
-    atcab_sha((uint16_t) sizeof(final), (const uint8_t*) final, out_hash);
+    //atcab_sha((uint16_t) sizeof(final), (const uint8_t*) final, out_hash);
+    Sha256 sha2;
+    wc_InitSha256(&sha2);
+    wc_Sha256Update(&sha2, final, sizeof(final));
+    wc_Sha256Final(&sha2, out_hash);
 }
 

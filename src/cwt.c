@@ -5,8 +5,11 @@
 
 #include "cwt.h"
 #include "tinycbor/cbor.h"
+#include <wolfssl/options.h>
+#include <wolfssl/wolfcrypt/settings.h>
+#include <wolfssl/wolfcrypt/random.h>
+#include <wolfssl/wolfcrypt/ecc.h>
 #include "utils.h"
-#include "cryptoauthlib.h"
 
 #define CBOR_LABEL_COSE_KEY 25
 #define CBOR_LABEL_AUDIENCE 3
@@ -37,7 +40,7 @@ void cwt_parse(rs_cwt* cwt, uint8_t* encoded, size_t len) {
     cwt->signature = elem;
 }
 
-int cwt_verify(rs_cwt* cwt, bytes *eaad, uint8_t *key) {
+int cwt_verify(rs_cwt* cwt, bytes *eaad, ecc_key *peer_key) {
     CborEncoder enc;
     uint8_t buffer[256];
     cbor_encoder_init(&enc, buffer, 256, 0);
@@ -65,15 +68,36 @@ int cwt_verify(rs_cwt* cwt, bytes *eaad, uint8_t *key) {
 
     // Compute digest
     uint8_t digest[32];
-    atcab_sha((uint16_t) buf_len, (const uint8_t*) buffer, digest);
+    //atcab_sha((uint16_t) buf_len, (const uint8_t*) buffer, digest);
+    Sha256 sha;
+    wc_InitSha256(&sha);
+    wc_Sha256Update(&sha, buffer, buf_len);
+    wc_Sha256Final(&sha, digest);
 
     // Extract Signature
     uint8_t* signature;
     size_t sig_len;
     cbor_value_dup_byte_string(&cwt->signature, &signature, &sig_len, NULL);
     
-    bool verified = 0;
-    atcab_verify_extern(digest, signature, key, &verified);
+    int verified = 0;
+    //atcab_verify_extern(digest, signature, key, &verified);
+    char r[65];
+    char s[65];
+    char hexmap[] = {'0', '1', '2', '3', '4', '5', '6', '7',
+                    '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'};
+    for(int i=0; i<32; i++){
+        r[2 * i] = hexmap[(signature[i] & 0xF0) >> 4];
+        r[2 * i + 1] = hexmap[signature[i] & 0x0F];
+        s[2 * i] = hexmap[(signature[i + 32] & 0xF0) >> 4];
+        s[2 * i + 1] = hexmap[signature[i + 32] & 0x0F];
+    }
+    r[64] = '\0';
+    s[64] = '\0';
+
+    byte sig[wc_ecc_sig_size(peer_key)];
+    word32 sigSz = sizeof(sig);
+    wc_ecc_rs_to_sig(r, s, sig, &sigSz);
+    wc_ecc_verify_hash(sig, sigSz, digest, sizeof(digest), &verified, peer_key);
     
     free(signature);
 

@@ -3,14 +3,21 @@
 #include "cose.h"
 #include "utils.h"
 #include "tinycbor/cbor.h"
-#include "cryptoauthlib.h"
-#include "mbedtls/ccm.h"
+#include <wolfssl/options.h>
+#include <wolfssl/wolfcrypt/settings.h>
+#include <wolfssl/wolfcrypt/sha.h>
+#include <wolfssl/wolfcrypt/sha256.h>
+#include <wolfssl/wolfcrypt/random.h>
+#include <wolfssl/wolfcrypt/hmac.h>
+#include <wolfssl/wolfcrypt/types.h>
+#include <wolfssl/wolfcrypt/wolfmath.h>
+#include <wolfssl/wolfcrypt/aes.h>
 #include "hkdf.h"
 
 #define DIGEST_SIZE 32
 #define TAG_SIZE 8
 
-void cose_encode_signed(cose_sign1* sign1, uint16_t key_id,
+void cose_encode_signed(cose_sign1* sign1, ecc_key key,
                         uint8_t* out, size_t out_size, size_t* out_len) {
     uint8_t sign_structure[256];
     size_t sign_struct_len = sizeof(sign_structure);
@@ -22,12 +29,37 @@ void cose_encode_signed(cose_sign1* sign1, uint16_t key_id,
     //phex(sign_structure, sign_struct_len);
 
     // Hash sign structure
+    //atcab_sha((uint16_t) sign_struct_len, (const uint8_t*) sign_structure, digest);
     uint8_t digest[DIGEST_SIZE];
-    atcab_sha((uint16_t) sign_struct_len, (const uint8_t*) sign_structure, digest);
+    Sha256 sha;
+    wc_InitSha256(&sha);
+    wc_Sha256Update(&sha, sign_structure, sign_struct_len);
+    wc_Sha256Final(&sha, digest);
+
 
     // Compute signature
+    uint8_t der[72];
     uint8_t signature[64];
-    atcab_sign(key_id, digest, signature);
+
+    //atcab_sign(key_id, digest, signature);
+    RNG rng;
+    wc_InitRng(&rng);
+
+    
+    int derSz = sizeof(der);
+    int ret = wc_ecc_sign_hash(digest, DIGEST_SIZE, der, &derSz, &rng, &key);
+    
+
+    // Convert DER to r and s
+    uint8_t rLen = der[3];
+    uint8_t sLen = der[5 + rLen];
+    memcpy(signature, der + 4 + (rLen == 32 ? 0 : 1), 32);
+    memcpy(signature + 32, der + 6 + rLen + (sLen == 32 ? 0 : 1), 32);
+
+    char r[32];
+    char s[32];
+    memcpy(r, signature, 32);
+    memcpy(s, signature + 32, 32);    
 
     // Encode sign1 structure
     CborEncoder enc;
@@ -82,18 +114,16 @@ void cose_encode_encrypted(cose_encrypt0 *enc0, uint8_t *key, uint8_t *iv, uint8
     // Encrypt
     uint8_t ciphertext[enc0->plaintext.len + TAG_SIZE];
 
-    mbedtls_ccm_context ccm;
-    mbedtls_ccm_init(&ccm);
-    mbedtls_ccm_setkey(&ccm, MBEDTLS_CIPHER_ID_AES, key, 128);
+    Aes aes;
+    wc_AesCcmSetKey(&aes, key, 16);
+    wc_AesCcmEncrypt(&aes, ciphertext, enc0->plaintext.buf, enc0->plaintext.len, iv, 7, ciphertext + enc0->plaintext.len, TAG_SIZE , aad, aad_len);
+    printf("PLAINTEXT: ");
+    phex(enc0->plaintext.buf, enc0->plaintext.len);
+    printf("CIPHERTEXT: ");
+    phex(ciphertext, enc0->plaintext.len);
+    printf("TAG: ");
+    phex(ciphertext + enc0->plaintext.len, TAG_SIZE);
 
-    mbedtls_ccm_encrypt_and_tag(&ccm, 
-                                enc0->plaintext.len, 
-                                iv, 7, 
-                                aad, aad_len, 
-                                enc0->plaintext.buf, 
-                                ciphertext, ciphertext+enc0->plaintext.len, TAG_SIZE);
-    
-    mbedtls_ccm_free(&ccm);
 
     // Encode
     CborEncoder enc;
@@ -167,14 +197,10 @@ void cose_kdf_context(const char* algorithm_id, int key_length, bytes *other, ui
 }
 
 void derive_key(bytes *input_key, bytes *info, uint8_t* out, size_t out_size) {
-    // TODO
-    const mbedtls_md_info_t *sha256 = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
-    mbedtls_hkdf(sha256, NULL, 0, input_key->buf, input_key->len, info->buf, info->len, out, out_size);
-    /*int mbedtls_hkdf( const mbedtls_md_info_t *md, const unsigned char *salt,
-                  size_t salt_len, const unsigned char *ikm, size_t ikm_len,
-                  const unsigned char *info, size_t info_len,
-                  unsigned char *okm, size_t okm_len )*/
-    // wc_HKDF(SHA256, input_key.buf, (word32) input_key.len, NULL, 0, info.buf, (word32) info.len, out, (word32) out_size);
+    
+    //const mbedtls_md_info_t *sha256 = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+    //mbedtls_hkdf(sha256, NULL, 0, input_key->buf, input_key->len, info->buf, info->len, out, out_size);
+    wc_HKDF(WC_HASH_TYPE_SHA256, input_key->buf, input_key->len, NULL, 0, info->buf, info->len, out, out_size);
 }
 
 void cose_decrypt_enc0(bytes* enc0, uint8_t *key, uint8_t *iv, bytes* external_aad,
@@ -212,13 +238,15 @@ void cose_decrypt_enc0(bytes* enc0, uint8_t *key, uint8_t *iv, bytes* external_a
     memcpy(auth_tag, ciphertext.buf + ciphertext.len - TAG_SIZE, TAG_SIZE);
 
     // Decrypt
-    mbedtls_ccm_context ccm;
-    mbedtls_ccm_init(&ccm);
-    mbedtls_ccm_setkey(&ccm, MBEDTLS_CIPHER_ID_AES, key, 128);
 
-    mbedtls_ccm_auth_decrypt(&ccm, sizeof(plaintext), iv, 7, aad, aad_len, ciphertext.buf, plaintext, auth_tag, TAG_SIZE);
+    Aes aes;
+    wc_AesCcmSetKey(&aes, key, 16);
+    wc_AesCcmDecrypt(&aes, plaintext, ciphertext.buf, sizeof(plaintext), iv, 7, auth_tag, TAG_SIZE, aad, aad_len);
+    printf("CIPHERTEXT: ");
+    phex(ciphertext.buf, sizeof(plaintext));
 
-    mbedtls_ccm_free(&ccm);
+
+    printf("PLAINTEXT: ");
     phex(plaintext, sizeof(plaintext));
 
     // Return plaintext to caller
@@ -230,7 +258,7 @@ void cose_decrypt_enc0(bytes* enc0, uint8_t *key, uint8_t *iv, bytes* external_a
     free(ciphertext.buf);
 }
 
-int cose_verify_sign1(bytes* sign1, uint8_t* key, bytes* external_aad) {
+int cose_verify_sign1(bytes* sign1, ecc_key *peer_key, bytes* external_aad) {
     /// Parse
     CborParser parser;
     CborValue val;
@@ -255,17 +283,39 @@ int cose_verify_sign1(bytes* sign1, uint8_t* key, bytes* external_aad) {
     bytes signature;
     cbor_value_dup_byte_string(&e, &signature.buf, &signature.len, &e);
 
-    /// Verify
+    // Verify
     uint8_t to_verify[256];
     size_t to_verify_len;
     cose_sign1_structure("Signature1", &protected, external_aad, &payload, to_verify, sizeof(to_verify), &to_verify_len);
 
     // Compute digest
     uint8_t digest[DIGEST_SIZE];
-    atcab_sha((uint16_t) to_verify_len, (const uint8_t*) to_verify, digest);
+    //atcab_sha((uint16_t) to_verify_len, (const uint8_t*) to_verify, digest);
+    Sha256 sha;
+    wc_InitSha256(&sha);
+    wc_Sha256Update(&sha, to_verify, to_verify_len);
+    wc_Sha256Final(&sha, digest);
 
-    bool verified = 0;
-    atcab_verify_extern(digest, signature.buf, key, &verified);
+
+    int verified = 0;
+    //atcab_verify_extern(digest, signature.buf, NULL, &verified);
+    char r[65];
+    char s[65];
+    char hexmap[] = {'0', '1', '2', '3', '4', '5', '6', '7',
+                    '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'};
+    for(int i=0; i<32; i++){
+        r[2 * i] = hexmap[(signature.buf[i] & 0xF0) >> 4];
+        r[2 * i + 1] = hexmap[signature.buf[i] & 0x0F];
+        s[2 * i] = hexmap[(signature.buf[i + 32] & 0xF0) >> 4];
+        s[2 * i + 1] = hexmap[signature.buf[i + 32] & 0x0F];
+    }
+    r[64] = '\0';
+    s[64] = '\0';
+
+    byte sig[wc_ecc_sig_size(peer_key)];
+    word32 sigSz = sizeof(sig);
+    wc_ecc_rs_to_sig(r, s, sig, &sigSz);
+    int ret = wc_ecc_verify_hash(sig, sigSz, digest, DIGEST_SIZE, &verified, peer_key);
 
     // Cleanup
     free(protected.buf);
